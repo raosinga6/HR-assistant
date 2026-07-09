@@ -4,12 +4,16 @@ Streamlit Web UI for HR AI Assistant.
 Provides a chat interface for interacting with the fine-tuned HR model.
 """
 
+import os
+
 import streamlit as st
 import numpy as np
-import mlx.core as mx
 from pathlib import Path
-from transformers import AutoTokenizer
-from unsloth import FastLanguageModel
+
+# NOTE: `mlx`, `transformers`, and `unsloth` are imported lazily inside the
+# functions that need them. They are platform-specific (mlx = Apple Silicon,
+# unsloth = CUDA) and must not be required just to start the app. This lets the
+# app boot in fallback mode on any Linux host (e.g. Azure Container Apps).
 
 
 def _sample_next_token(logits: np.ndarray, temperature: float = 1.0, top_p: float = 0.9) -> int:
@@ -69,6 +73,8 @@ def _generate_text(
     temperature: float = 0.7,
     top_p: float = 0.9,
 ) -> str:
+    import mlx.core as mx  # lazy: Apple-Silicon-only dependency
+
     inputs = _tokenize_prompt(tokenizer, prompt)
     token_ids = inputs["input_ids"]
     if hasattr(token_ids, "cpu"):
@@ -102,6 +108,9 @@ if "user_input" not in st.session_state:
 @st.cache_resource
 def load_model(model_path: str = "models/instruction_ft_adapter", max_seq_length: int = 512):
     """Load the fine-tuned model and tokenizer (cached)."""
+    from transformers import AutoTokenizer  # lazy import
+    from unsloth import FastLanguageModel  # lazy: CUDA-only dependency
+
     st.info(f"Loading model from: {model_path}")
     local_path = Path(model_path)
 
@@ -226,8 +235,12 @@ def main():
 
         # Model settings
         st.subheader("⚙️ Settings")
-        model_path = st.text_input("Model Path", value="models/non_instruction_ft_adapter")
-        use_fallback = st.checkbox("Use fallback responses (no model)", value=False)
+        # Defaults are configurable via environment variables so the same image
+        # can be deployed in fallback mode (default) or pointed at a model.
+        default_model_path = os.getenv("HR_MODEL_PATH", "models/non_instruction_ft_adapter")
+        default_fallback = os.getenv("HR_FALLBACK", "0").lower() in ("1", "true", "yes")
+        model_path = st.text_input("Model Path", value=default_model_path)
+        use_fallback = st.checkbox("Use fallback responses (no model)", value=default_fallback)
         max_tokens = st.slider("Max Tokens", 50, 500, 200, 50)
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.1)
 
