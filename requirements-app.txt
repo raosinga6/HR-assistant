@@ -1,0 +1,13 @@
+# Runtime dependencies for the deployable Streamlit app (fallback mode).
+#
+# This is intentionally SLIM: it does NOT include mlx / unsloth / torch /
+# transformers, which are platform-specific (mlx = Apple Silicon, unsloth =
+# CUDA) and are only needed to serve the fine-tuned model. The container built
+# from these deps runs the app in fallback mode on any Linux host.
+#
+# To serve the real fine-tuned model you must (a) port the generation loop off
+# mlx onto torch/transformers and (b) deploy on GPU-enabled compute. See
+# docs/AZURE_DEPLOYMENT.md ("Deployment modes").
+
+streamlit>=1.28.0
+numpy>=1.24.0

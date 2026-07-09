@@ -1,0 +1,44 @@
+# Keep the build context small and secret-free.
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Model weights & large binaries (not needed for fallback image)
+models/
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+
+# Data & notebooks (not needed at runtime)
+data/
+notebooks/
+reports/
+tmp/
+
+# Docs & office files
+docs/
+*.docx
+
+# Secrets / local config
+.env
+.env.*
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Tests
+tests/
