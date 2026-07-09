@@ -30,8 +30,9 @@ lightweight **reranker** to pick the best one.
 | Stage 2 – instruction tuning (SFT) | `notebooks/instruction_finetuning.ipynb` | Teach the model to *answer questions* |
 | Stage 3 – preference alignment (DPO) | `notebooks/dpo_alignment.ipynb` | Align tone/quality using chosen/rejected pairs |
 | Model artifacts | `models/*` | LoRA adapters / merged weights per stage |
-| Inference engine | `src/inference.py` | Loads model, builds prompt, samples, reranks (CLI) |
-| Web UI | `src/app.py` | Streamlit chat front-end (same logic as inference) |
+| Generation backend | `src/generation.py` | Portable `transformers`+`peft` loading, prompt, `model.generate`, rerank |
+| Inference engine | `src/inference.py` | `HRAssistant` wrapper + CLI (delegates to the generation backend) |
+| Web UI | `src/app.py` | Streamlit chat front-end (delegates to the generation backend) |
 | Reranker | `src/reranker.py` | Scores candidate answers, returns the best |
 | Fallback responder | `src/app.py`, `src/inference.py` | Deterministic canned answers when no model is loaded |
 
@@ -77,9 +78,8 @@ flowchart TD
     FB -- yes --> TMPL[Template responder<br/>sick-leave / actionable / policy]
     TMPL --> OUT[Answer rendered in chat]
 
-    FB -- no --> INT[Intent detection<br/>_is_actionable]
-    INT --> P[Build prompt<br/>system + instruction template<br/>+ ### Instruction / ### Response]
-    P --> GEN["Generate N=5 candidates<br/>_generate_text (mlx sampling loop)"]
+    FB -- no --> P["Build prompt<br/>bare Alpaca:<br/>### Instruction / ### Response"]
+    P --> GEN["Generate N candidates<br/>model.generate (transformers+peft)"]
     GEN --> RR[Rerank candidates<br/>src/reranker.rerank]
     RR --> RETRY{Best looks like code?}
     RETRY -- yes --> GEN0["Deterministic retry<br/>temperature=0"]
@@ -88,27 +88,28 @@ flowchart TD
 ```
 
 ### Step-by-step (model mode)
-1. **Intent detection** — `_is_actionable()` checks for words like *how, apply,
-   procedure, steps, submit*. Actionable questions get a "numbered procedure"
-   instruction template; others get a "policy summary" template.
-2. **Prompt construction** — a system prompt + the chosen instruction template +
-   the question, wrapped in `### Instruction: / ### Response:` markers.
-3. **Candidate generation** — `_generate_text()` runs a hand-rolled token loop
-   (tokenize → forward pass → `_sample_next_token` with temperature/top-p → append
-   → stop on EOS). It produces **5 candidates**.
-4. **Reranking** — `reranker.rerank()` scores each candidate:
+1. **Prompt construction** — `generation.build_prompt()` wraps the question in the
+   **exact** format the model was fine-tuned on and nothing more:
+   `### Instruction:\n{question}\n\n### Response:\n`. (An earlier version added a
+   system prompt + extra instruction template; that was out-of-distribution and
+   hurt quality, so it was removed.)
+2. **Candidate generation** — `generation.generate_candidates()` calls
+   `model.generate()` once with `num_return_sequences=N` (default 3), sampling with
+   temperature/top-p and stopping on EOS. The prompt prefix is then stripped from
+   each output.
+3. **Reranking** — `reranker.rerank()` scores each candidate:
    - heavy penalty for code-like output (`#include`, `std::`, …),
    - bonus for numbered steps / the word "step" on actionable questions,
    - small penalties for too-short / too-long answers.
    The highest scorer wins (ties → first candidate).
-5. **Code guard / retry** — if the winner still looks like code, regenerate once
+4. **Code guard / retry** — if the winner still looks like code, regenerate once
    deterministically (`temperature=0`).
 
 ### Fallback mode
 When `HR_FALLBACK` is set (or the sidebar box is ticked), the app skips the model
 entirely and returns deterministic templated answers routed by keywords
-(sick-leave → generic-actionable → policy). This path has **no** mlx/unsloth/torch
-dependency and is what the container image runs by default.
+(sick-leave → generic-actionable → policy). This path has **no** ML dependency at
+all and is what the slim container image runs by default.
 
 ---
 
@@ -117,29 +118,35 @@ dependency and is what the container image runs by default.
 | Concern | Detail |
 |---|---|
 | Base model | Qwen2.5-0.5B (~500M params) |
-| Quantization | 4-bit (QLoRA) via Unsloth — **requires CUDA GPU** |
-| Generation backend | `mlx.core` — **Apple Silicon only** (does not run on Azure Linux) |
+| Fine-tuning | LoRA adapter (`peft`), loaded on top of the base model |
+| Generation backend | `transformers` + `peft` via `model.generate()` — runs on **CPU, CUDA, or MPS** |
+| Device selection | auto: CUDA → MPS → CPU, override with `HR_DEVICE` |
 | UI | Streamlit, port **8501**, health endpoint `/_stcore/health` |
-| Config | `HR_FALLBACK`, `HR_MODEL_PATH` environment variables |
+| Config | `HR_FALLBACK`, `HR_MODEL_PATH`, `HR_DEVICE` environment variables |
 
-Because generation uses `mlx` (Apple Silicon) and 4-bit uses Unsloth (CUDA),
-**the model-serving path is not portable to a generic Azure Linux container.**
-The deployable image therefore defaults to fallback mode. Serving the real model
-on Azure requires porting `_generate_text` to `torch`/`transformers` and running
-on GPU compute — see [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md) §"Deployment modes".
+The generation backend is now **portable**: because it uses standard
+`transformers`/`peft` (no `mlx`, no Unsloth 4-bit), the fine-tuned 0.5B model can
+run on a plain CPU container — no GPU required (GPU only speeds it up). The slim
+image still defaults to fallback mode; see
+[AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md) §"Deployment modes" for the model-serving
+image.
 
 ---
 
-## 6. Known limitations (why answers can be wrong)
+## 6. Known limitations (why answers can still be imperfect)
 
-1. **No retrieval/grounding** — it is not RAG, so the model has nothing to ground
-   answers in and will confabulate.
-2. **Default model path** — the app defaults to `non_instruction_ft_adapter`, the
-   domain-adaptation model that was never taught to answer questions.
-3. **Missing final model** — `inference.py` defaults to `models/dpo_aligned_merged`,
-   which does not exist on disk.
-4. **Fragile generation** — the custom `mlx` loop, `strict=False` weight loading,
-   and a training/inference prompt-format mismatch degrade output quality.
+**Fixed** (generation path now works):
+- ✅ Default model is the **SFT adapter** (`instruction_ft_adapter`) — one that was
+  actually trained to answer questions.
+- ✅ Prompt format now matches training exactly (bare Alpaca).
+- ✅ Generation uses `model.generate()` via `transformers`/`peft` — no more mlx loop
+  or silent `strict=False` weight loading.
 
-These are documented here so a deployer understands that fallback mode is the
-reliable path today, and serving the fine-tuned model is a follow-up effort.
+**Remaining** (model/data limits, not code bugs):
+1. **No retrieval/grounding** — it is not RAG, so the model answers purely from its
+   weights and can still confabulate on facts outside its training data. Adding a
+   retrieval layer over the HR policy docs is the highest-impact next step.
+2. **Small model** — Qwen2.5-0.5B is tiny; answers are fluent and on-topic but can
+   be shallow or occasionally inaccurate.
+3. **No DPO/merged model on disk** — Stage 3 artifacts were never produced, so the
+   assistant serves the SFT adapter rather than a preference-aligned model.

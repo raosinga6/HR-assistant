@@ -1,0 +1,11 @@
+# Runtime dependencies for the MODEL-serving image (serves the fine-tuned model).
+#
+# Portable CPU/GPU stack — no mlx, no unsloth, no bitsandbytes. Install `torch`
+# separately (see Dockerfile.model) so you can choose the CPU or CUDA wheel.
+
+transformers>=4.44.0
+peft>=0.11.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+streamlit>=1.28.0
+numpy>=1.24.0
