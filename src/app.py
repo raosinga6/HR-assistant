@@ -50,23 +50,6 @@ def load_rag():
     return HRRag()
 
 
-def render_metrics(meta: dict):
-    """Show token usage / latency for one answer as a compact metric row."""
-    if not meta:
-        return
-    cols = st.columns(4)
-    cols[0].metric("Prompt tokens", meta.get("prompt_tokens", 0))
-    cols[1].metric("Completion tokens", meta.get("completion_tokens", 0))
-    cols[2].metric("Total tokens", meta.get("total_tokens", 0))
-    cols[3].metric("Latency (s)", meta.get("latency_s", 0))
-    bits = [f"mode: **{meta.get('mode')}**", f"device: `{meta.get('device')}`"]
-    if meta.get("top_score") is not None:
-        bits.append(f"top match: `{meta.get('top_score')}`")
-    if meta.get("refused"):
-        bits.append("↩︎ **refused** (below retrieval threshold)")
-    st.caption(" · ".join(bits))
-
-
 def fallback_answer(question: str) -> str:
     """Deterministic template answers used when no model is loaded."""
     ql = question.strip().lower()
@@ -148,24 +131,9 @@ def main():
                 st.session_state.user_input = q
                 st.rerun()
 
-        # Observability panel
+        # Token usage lives on its own page now.
         st.markdown("---")
-        st.subheader("📊 Observability")
-        st.metric("Tokens used this session", st.session_state.get("total_tokens", 0))
-        audit = st.session_state.get("audit", [])
-        st.caption(f"{len(audit)} question(s) logged → `{os.getenv('HR_AUDIT_LOG', 'logs/audit_log.jsonl')}`")
-        if audit:
-            with st.expander("🧾 Audit log (this session)"):
-                for i, e in enumerate(reversed(audit), 1):
-                    m = e["meta"]
-                    st.markdown(f"**Q:** {e['q']}")
-                    refs = ", ".join(s.get("source_ref", "?") for s in e["sources"]) or "—"
-                    st.caption(
-                        f"{m.get('total_tokens', 0)} tok · {m.get('latency_s', 0)}s · "
-                        f"{'refused' if m.get('refused') else 'answered'} · retrieved from: {refs}"
-                    )
-                    if i < len(audit):
-                        st.divider()
+        st.caption("📊 Token usage & audit log → see the **Token Usage** page in the navigation above.")
 
     # Main content
     st.title("HR Policy Assistant")
@@ -193,13 +161,9 @@ def main():
             st.info("Make sure the model path is correct, or switch modes in the sidebar.")
             return
 
-    # Chat history + observability state
+    # Chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "audit" not in st.session_state:
-        st.session_state.audit = []
-    if "total_tokens" not in st.session_state:
-        st.session_state.total_tokens = 0
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -208,8 +172,6 @@ def main():
                 ref = s.get("source_ref", s.get("source", ""))
                 with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
                     st.markdown(s["text"])
-            if message.get("meta"):
-                render_metrics(message["meta"])
 
     # Chat input
     if prompt := st.chat_input("Ask an HR question..."):
@@ -247,15 +209,11 @@ def main():
                         ref = s.get("source_ref", s.get("source", ""))
                         with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
                             st.markdown(s["text"])
-                    render_metrics(meta)
 
-                    # Persist to the audit log + running session totals.
+                    # Persist to the audit log (viewable on the Token Usage page).
                     append_audit_log(prompt, response, sources, meta)
-                    st.session_state.audit.append(
-                        {"q": prompt, "meta": meta, "sources": sources})
-                    st.session_state.total_tokens += meta.get("total_tokens", 0)
 
-                    msg = {"role": "assistant", "content": response, "meta": meta}
+                    msg = {"role": "assistant", "content": response}
                     if sources:
                         msg["sources"] = sources
                     st.session_state.messages.append(msg)
