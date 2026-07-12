@@ -99,6 +99,24 @@ def append_audit_log(question: str, answer: str, sources: List[Dict],
     return entry
 
 
+def read_audit_log(path: Optional[str] = None) -> List[Dict]:
+    """Read all audit-log entries (oldest first). Missing file -> []."""
+    path = path or os.getenv("HR_AUDIT_LOG", DEFAULT_AUDIT_LOG)
+    p = Path(path)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 # --------------------------------------------------------------------------
 # Corpus
 # --------------------------------------------------------------------------

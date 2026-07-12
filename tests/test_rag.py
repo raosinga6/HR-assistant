@@ -8,7 +8,7 @@ if ROOT not in sys.path:
 import json
 
 from src.rag import (REFUSAL, SYSTEM_PROMPT, append_audit_log, build_corpus,
-                     build_messages, format_context)
+                     build_messages, format_context, read_audit_log)
 
 CHUNKS = [
     {"id": "qa-1", "source": "policy Q&A", "text": "Q: Who approves comp off?\nA: Your reporting manager.", "score": 0.7},
@@ -71,3 +71,18 @@ def test_append_audit_log_writes_jsonl(tmp_path):
     assert entry["sources"][0]["id"] == "qa-1"
     on_disk = json.loads(log.read_text().strip())
     assert on_disk == entry
+
+
+def test_read_audit_log_roundtrip(tmp_path):
+    log = str(tmp_path / "audit.jsonl")
+    meta = {"mode": "grounded", "total_tokens": 15, "refused": False}
+    append_audit_log("Q1?", "A1", CHUNKS, meta, path=log)
+    append_audit_log("Q2?", "A2", CHUNKS, meta, path=log)
+
+    entries = read_audit_log(log)
+    assert len(entries) == 2
+    assert [e["question"] for e in entries] == ["Q1?", "Q2?"]  # oldest first
+
+
+def test_read_audit_log_missing_file_returns_empty(tmp_path):
+    assert read_audit_log(str(tmp_path / "nope.jsonl")) == []

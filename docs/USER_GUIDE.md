@@ -91,6 +91,11 @@ Every answer is instrumented:
   `data/<file>:<line>` it was retrieved from, expandable to the full text.
 - **Session totals** (sidebar → 📊 Observability): running token count and an
   in-session audit-log view.
+- **Token Usage page** (sidebar navigation → *Token Usage*): a dedicated page
+  listing every question and the tokens it used, appended as questions are
+  asked — with summary metrics, per-question table (time, mode, prompt /
+  completion / total tokens, latency, sources), tokens-per-question and
+  cumulative charts, and a log download.
 - **Persistent audit log**: every question is appended to
   `logs/audit_log.jsonl` (one JSON object per answer) with timestamp, question,
   answer, refusal flag, the retrieved sources (`id`, `source_ref`, `score`), and
