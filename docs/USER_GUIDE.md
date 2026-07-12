@@ -150,4 +150,5 @@ See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md):
 | Answers look generic or fabricated | You're likely in **Fine-tuned** mode — switch to **Grounded** (the default) for cited, corpus-only answers that refuse when the policy doesn't cover the question. |
 | Grounded mode refuses a question it should answer | The corpus genuinely may not cover it, or the match scored below `HR_RAG_MIN_SCORE` (0.45). Lower the threshold or add the policy text to `data/`, then delete `hr_index/` to rebuild. |
 | Streamlit prints `torchvision` tracebacks | Harmless watcher noise; already disabled via `.streamlit/config.toml` (`fileWatcherType = "none"`). |
+| `Failed to load grounded pipeline: … partially initialized module 'accelerate.state' (circular import)` | Streamlit's module watcher imported `accelerate` from another thread mid-load. Fixed by disabling the watcher — **restart the app** (use `./run_ui.sh`, which passes `--server.fileWatcherType none`, or run from the project root so `.streamlit/config.toml` is found). |
 | HF Hub rate-limit warnings | Harmless; set `HF_TOKEN` to silence and speed up downloads. |

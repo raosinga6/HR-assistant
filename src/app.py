@@ -11,6 +11,18 @@ import os
 
 import streamlit as st
 
+# Warm up the heavy ML stack once, in a controlled order, before anything else
+# can import it from another thread. Streamlit's module watcher imports
+# transformers submodules concurrently with model loading, which can trigger a
+# circular import in accelerate.state ("partially initialized module"). Fully
+# importing accelerate here first resolves it. Guarded so the slim fallback
+# image (no ML deps installed) still boots.
+try:  # pragma: no cover - environment-dependent warm-up
+    import accelerate  # noqa: F401
+    import transformers  # noqa: F401
+except Exception:
+    pass
+
 # Backend import works whether launched via `streamlit run src/app.py`
 # (src/ on path) or imported as a package.
 try:
