@@ -14,8 +14,9 @@ domain-specific AI assistant** that answers these questions in company-policy
 language, runs on commodity hardware, and never sends employee questions to an
 external API.
 
-**Deliverables:** a chat UI (Streamlit), a CLI, a Python API (`HRAssistant`),
-container images for Azure, and a test suite.
+**Deliverables:** a multipage chat UI (Streamlit) with **grounded retrieval
+(RAG), citations, and per-question observability**, a CLI, a Python API
+(`HRAssistant`), container images for Azure, and a 32-test suite.
 
 ---
 
@@ -33,10 +34,10 @@ GPU cluster**. Qwen2.5-0.5B won on four criteria:
 
 **The honest trade-off:** a 0.5B model has limited world knowledge and shallow
 reasoning. That is acceptable here because the domain is narrow (HR policy) and
-the roadmap adds retrieval grounding (§6), which shifts the factual burden from
-the model's weights to retrieved documents. If we needed deeper reasoning
-without retrieval, we'd step up to 1.5B–7B — at proportionally higher serving
-cost.
+we added **retrieval grounding** (§4), which shifts the factual burden from the
+model's weights to retrieved documents — the small model only has to *rephrase*
+text it is shown, not *recall* facts. If we needed deeper reasoning without
+retrieval, we'd step up to 1.5B–7B — at proportionally higher serving cost.
 
 ---
 
@@ -86,17 +87,31 @@ out-of-distribution and quality collapses (we learned this the hard way, §5).
 
 ## 4. How it works at inference time
 
+The app has **three answer modes**; Grounded is the default.
+
+**Grounded (RAG) — the trustworthy path:**
 ```
-question ──► build_prompt (exact training format)
-        ──► model.generate() — 3 sampled candidates (transformers + peft)
-        ──► reranker: penalize code-like output, reward numbered steps
-        ──► guard: deterministic retry if the winner still looks like code
-        ──► answer
+question ──► embed ──► retrieve top-k policy passages (MiniLM + cosine)
+        ──► if best score < 0.45: REFUSE ("I don't know…")   ← anti-fabrication gate
+        ──► else: prompt = system rules + passages + question
+        ──► model.generate() (Qwen2.5-0.5B-Instruct), deterministic
+        ──► answer + numbered citations (each traceable to data/<file>:<line>)
 ```
 
+**Fine-tuned (ungrounded) — the original path, kept for comparison:**
+```
+question ──► build_prompt (exact training format)
+        ──► model.generate() — candidates (transformers + peft)
+        ──► reranker: penalize code, reward numbered steps ──► best answer
+```
+
+**Fallback:** deterministic keyword-routed templates, zero ML dependencies —
+demos, CI, and the slim Azure container.
+
 - Runs on **CPU, CUDA, or MPS** (auto-detected; `HR_DEVICE` overrides).
-- A **fallback mode** serves deterministic template answers with zero ML
-  dependencies — used for demos, CI, and the slim Azure container.
+- **Observability:** every answer is written to `logs/audit_log.jsonl` (question,
+  answer, refusal flag, retrieved sources with line-level provenance, token/latency
+  metrics); the **Token Usage** page renders the running table and charts.
 - Full data-flow diagrams: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
@@ -121,36 +136,62 @@ review traced it to four independent bugs — none of them the model's fault:
 
 ---
 
-## 6. Current status & roadmap
+## 6. Key things to note
 
-**Working today** (verified on `main`): coherent HR answers in ~4–12 s on Apple
-Silicon, 23 passing tests, Azure-deployable containers (fallback + CPU model
-serving).
+For anyone using, reviewing, or extending this app:
 
-**Known limits:** answers come from 120 training pairs — the model is fluent
-but can be generic outside them; it cannot cite sources; DPO artifacts were
-never exported, so the preference-alignment stage isn't in the served model.
-
-**Roadmap, in order of impact:**
-1. ~~**Retrieval grounding (RAG)**~~ — ✅ **shipped** (`src/rag.py`): policy
-   passages + Q&A pairs are embedded and retrieved per question; answers are
-   constrained to retrieved text with citations; a retrieval-score threshold
-   refuses out-of-corpus questions (e.g. sick leave — which the policy data
-   never covers) instead of letting the model improvise. Grounded mode is the
-   app default. Pattern proven first in the sibling
-   [wiki-rag-assistant](https://github.com/raosinga6/wiki-rag-assistant) project.
-2. **Export and serve the DPO-aligned model** (stage 3 artifacts).
-3. **Evaluation harness** — regression-test answer quality on a held-out Q&A
-   set, so model changes are measurable rather than vibes-based.
-4. **Larger base model (1.5B+)** if quality ceilings are hit after RAG.
+1. **Default to Grounded mode.** It cites its sources and refuses when the policy
+   doesn't cover a question. Fine-tuned mode answers from weights and *can
+   fabricate* — the same question there once produced three contradictory
+   sick-leave procedures. Use it only to demonstrate that contrast.
+2. **The corpus is small and specific.** It covers what's in `data/` (comp-off,
+   policy-review cadence, work hours…). It does **not** contain a sick-leave or
+   work-from-home policy — so grounded mode correctly refuses those. That's a
+   feature, not a bug. Add policy text to `data/` and delete `hr_index/` to grow
+   coverage.
+3. **The refusal threshold (`HR_RAG_MIN_SCORE`, 0.45) is the anti-fabrication
+   gate.** Below it, grounded mode refuses *before* generating. Lower it and the
+   small model starts improvising from weak matches; raise it and it refuses more.
+4. **Every answer is auditable.** Citations trace to `data/<file>:<line>`, and
+   `logs/audit_log.jsonl` records question, answer, sources, and token/latency
+   metrics. The **Token Usage** page reads that log.
+5. **Determinism:** grounded mode runs at `temperature=0` — same question, same
+   answer. Good for policy QA; raise temperature only if you want variety.
+6. **Prompt format is a contract** (§5). If you retrain, keep inference in sync.
+7. **Two sibling projects share this design:**
+   [wiki-rag-assistant](https://github.com/raosinga6/wiki-rag-assistant) proved
+   the RAG pattern first; this repo applied it to HR data.
 
 ---
 
-## 7. Where to start as a new developer
+## 7. Current status & roadmap
+
+**Working today** (verified on `main`): grounded, cited HR answers in ~2–12 s on
+Apple Silicon; three answer modes; per-question observability + audit log; 32
+passing tests; Azure-deployable containers (fallback + CPU model serving).
+
+**Known limits:** the corpus is small (~180 passages), so coverage is narrow;
+the 0.5B generator is fluent but shallow; DPO (stage 3) artifacts were never
+exported, so the served generator is the SFT adapter, not the preference-aligned
+model.
+
+**Roadmap, in order of impact:**
+1. ~~**Retrieval grounding (RAG)**~~ — ✅ **shipped** (`src/rag.py`): the app
+   default. Pattern proven first in the sibling
+   [wiki-rag-assistant](https://github.com/raosinga6/wiki-rag-assistant) project.
+2. **Grow the policy corpus** — the biggest lever on how much it can answer.
+3. **Export and serve the DPO-aligned model** (stage 3 artifacts).
+4. **Evaluation harness** — regression-test answer quality on a held-out Q&A set
+   (and measure refusal precision/recall), so changes are measurable not vibes.
+5. **Larger base model (1.5B+)** if quality ceilings are hit after RAG.
+
+---
+
+## 8. Where to start as a new developer
 
 1. Run it: [USER_GUIDE.md](USER_GUIDE.md) (5 minutes to first answer).
 2. Read the code tour: [CODE_OVERVIEW.md](CODE_OVERVIEW.md) — start with
-   `src/generation.py` (~160 lines, the whole inference story).
+   `src/rag.py` (grounded default) then `src/generation.py` (fine-tuned path).
 3. Skim `notebooks/instruction_finetuning.ipynb` to see where the prompt
    format contract comes from.
 4. Deployment: [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md).

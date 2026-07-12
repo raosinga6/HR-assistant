@@ -68,26 +68,46 @@ Each stage consumes the previous stage's weights, so the pipeline is sequential:
 
 ## 4. Inference-time data flow
 
-This is what happens on every question in the running app.
+This is what happens on every question in the running app. The sidebar
+**Answer mode** picks one of three paths; **Grounded (RAG)** is the default.
 
 ```mermaid
 flowchart TD
     Q[User question] --> UI[Streamlit UI<br/>src/app.py]
-    UI --> FB{Fallback mode?<br/>HR_FALLBACK}
+    UI --> MODE{Answer mode}
 
-    FB -- yes --> TMPL[Template responder<br/>sick-leave / actionable / policy]
-    TMPL --> OUT[Answer rendered in chat]
+    MODE -- Grounded --> RET["Retrieve top-k policy passages<br/>src/rag.py (MiniLM + cosine)"]
+    RET --> GATE{Top score ≥ 0.45?}
+    GATE -- no --> REF["Refuse: 'I don't know…'"]
+    GATE -- yes --> GP["Prompt = system rules + passages + question"]
+    GP --> GG["model.generate (Qwen2.5-0.5B-Instruct)"]
+    GG --> OUT[Answer + citations<br/>each traceable to data:line]
+    REF --> OUT
 
-    FB -- no --> P["Build prompt<br/>bare Alpaca:<br/>### Instruction / ### Response"]
+    MODE -- Fine-tuned --> P["Build prompt<br/>bare Alpaca: ### Instruction / ### Response"]
     P --> GEN["Generate N candidates<br/>model.generate (transformers+peft)"]
     GEN --> RR[Rerank candidates<br/>src/reranker.rerank]
-    RR --> RETRY{Best looks like code?}
-    RETRY -- yes --> GEN0["Deterministic retry<br/>temperature=0"]
-    RETRY -- no --> OUT
-    GEN0 --> OUT
+    RR --> OUT
+
+    MODE -- Fallback --> TMPL[Template responder<br/>sick-leave / actionable / policy]
+    TMPL --> OUT
+
+    OUT --> LOG[(logs/audit_log.jsonl<br/>tokens · latency · sources)]
+    LOG --> TU[Token Usage page]
 ```
 
-### Step-by-step (model mode)
+### Step-by-step — Grounded mode (default)
+1. **Retrieve** — embed the question (MiniLM) and take the top-k policy passages
+   by cosine similarity from the `hr_index/` vector store.
+2. **Refuse-early gate** — if the best passage scores below `HR_RAG_MIN_SCORE`
+   (0.45), return *"I don't know based on the company's policy documents."*
+   without generating. This is the anti-fabrication guard.
+3. **Grounded prompt** — a system prompt ("answer ONLY from these passages, cite
+   by number, refuse otherwise") + the numbered passages + the question.
+4. **Generate** — `model.generate()` (deterministic, `temperature=0`); the answer
+   carries citations that trace to each passage's `data/<file>:<line>`.
+
+### Step-by-step — Fine-tuned mode (ungrounded)
 1. **Prompt construction** — `generation.build_prompt()` wraps the question in the
    **exact** format the model was fine-tuned on and nothing more:
    `### Instruction:\n{question}\n\n### Response:\n`. (An earlier version added a
@@ -122,7 +142,8 @@ all and is what the slim container image runs by default.
 | Generation backend | `transformers` + `peft` via `model.generate()` — runs on **CPU, CUDA, or MPS** |
 | Device selection | auto: CUDA → MPS → CPU, override with `HR_DEVICE` |
 | UI | Streamlit, port **8501**, health endpoint `/_stcore/health` |
-| Config | `HR_FALLBACK`, `HR_MODEL_PATH`, `HR_DEVICE` environment variables |
+| Retrieval (grounded mode) | MiniLM embeddings + exact numpy cosine over `hr_index/`; generator `Qwen2.5-0.5B-Instruct` |
+| Config | `HR_FALLBACK`, `HR_MODEL_PATH`, `HR_DEVICE`, `HR_RAG_MODEL`, `HR_RAG_MIN_SCORE`, `HR_AUDIT_LOG` |
 
 The generation backend is now **portable**: because it uses standard
 `transformers`/`peft` (no `mlx`, no Unsloth 4-bit), the fine-tuned 0.5B model can
@@ -142,11 +163,19 @@ image.
 - ✅ Generation uses `model.generate()` via `transformers`/`peft` — no more mlx loop
   or silent `strict=False` weight loading.
 
+**Fixed** (grounding shipped):
+- ✅ **Retrieval/grounding (RAG)** — the default mode retrieves policy passages and
+  answers only from them, with citations and an out-of-corpus refusal. This is the
+  fix for the "it hallucinates" problem: the fine-tuned model alone answered from
+  weights and could confabulate.
+
 **Remaining** (model/data limits, not code bugs):
-1. **No retrieval/grounding** — it is not RAG, so the model answers purely from its
-   weights and can still confabulate on facts outside its training data. Adding a
-   retrieval layer over the HR policy docs is the highest-impact next step.
-2. **Small model** — Qwen2.5-0.5B is tiny; answers are fluent and on-topic but can
-   be shallow or occasionally inaccurate.
+1. **Small corpus** — grounded mode can only answer what's in `data/` (~180
+   passages); outside that it correctly refuses. Growing the corpus is the
+   highest-impact next step.
+2. **Small model** — Qwen2.5-0.5B is tiny; answers are fluent but can be shallow.
+   In grounded mode it mostly rephrases retrieved text, which mitigates this.
 3. **No DPO/merged model on disk** — Stage 3 artifacts were never produced, so the
    assistant serves the SFT adapter rather than a preference-aligned model.
+4. **Fine-tuned mode can still fabricate** — it answers from weights with no
+   grounding; kept only for comparison. Prefer grounded mode.

@@ -53,10 +53,12 @@ in the sidebar.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Model Path | `models/instruction_ft_adapter` | LoRA adapter dir, full model dir, or HF hub id |
-| Use fallback responses | off | Answer from deterministic templates without loading a model |
+| Answer mode | Grounded (RAG, cited) | Grounded / Fine-tuned / Fallback — see the modes table in §1 |
+| Model Path (fine-tuned mode) | `models/instruction_ft_adapter` | LoRA adapter dir, full model dir, or HF hub id |
 | Max Tokens | 200 | Answer length cap |
-| Temperature | 0.7 | 0 = deterministic, higher = more varied |
+| Temperature | 0.0 | 0 = same answer every time (recommended for policy QA); higher = more varied |
+
+The sidebar navigation also lists a **Token Usage** page (see §5).
 
 ---
 
@@ -82,24 +84,22 @@ Useful flags: `--model_path <dir|hub-id>`, `--max_tokens N`, `--temperature T`.
 
 ## 5. Observability
 
-Every answer is instrumented:
+The chat page stays focused on the conversation. In **grounded mode** each answer
+still shows its **cited sources** — expandable, each labelled with the exact
+`data/<file>:<line>` it was retrieved from. All token/usage detail lives in two
+places:
 
-- **Per-answer metrics** (shown under each response): prompt tokens, completion
-  tokens, total tokens, latency, mode, device, and — in grounded mode — the top
-  retrieval score.
-- **Source provenance** (grounded mode): each cited passage shows the exact
-  `data/<file>:<line>` it was retrieved from, expandable to the full text.
-- **Session totals** (sidebar → 📊 Observability): running token count and an
-  in-session audit-log view.
 - **Token Usage page** (sidebar navigation → *Token Usage*): a dedicated page
-  listing every question and the tokens it used, appended as questions are
-  asked — with summary metrics, per-question table (time, mode, prompt /
-  completion / total tokens, latency, sources), tokens-per-question and
-  cumulative charts, and a log download.
-- **Persistent audit log**: every question is appended to
-  `logs/audit_log.jsonl` (one JSON object per answer) with timestamp, question,
-  answer, refusal flag, the retrieved sources (`id`, `source_ref`, `score`), and
-  token/latency metrics. Point `HR_AUDIT_LOG` elsewhere to change the path.
+  listing every question and the tokens it used, appended as questions are asked
+  — with summary metrics (questions, prompt / completion / total tokens, average
+  per question), a per-question table (time, question, mode, tokens, latency,
+  refusal flag, and the `data:line` sources it was retrieved from),
+  tokens-per-question and cumulative charts, and a JSONL log download.
+- **Persistent audit log** (`logs/audit_log.jsonl`): one JSON object per answer
+  with timestamp, question, answer, refusal flag, the retrieved sources
+  (`id`, `source_ref`, `score`), and token/latency metrics. The Token Usage page
+  reads this file, so it reflects **every** question — including prior sessions.
+  Point `HR_AUDIT_LOG` elsewhere to change the path.
 
 Example audit entry (abridged):
 ```json
@@ -124,15 +124,15 @@ Example audit entry (abridged):
 
 ---
 
-## 6. Running the tests
+## 7. Running the tests
 
 ```bash
-pytest -q        # 23 tests, ~5s (no model download needed)
+pytest -q        # 32 tests, ~5s (no model download needed)
 ```
 
 ---
 
-## 7. Deploying
+## 8. Deploying
 
 See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md):
 - **Fallback image** (`Dockerfile`) — tiny, no ML deps, deterministic answers.
@@ -140,12 +140,14 @@ See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md):
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| First answer is slow | Base model downloading / loading (~15–20s). Subsequent answers: ~4–12s on MPS, slower on CPU. |
-| `Failed to load model` in the UI | Check Model Path exists (needs `adapter_config.json` for adapters); or tick "Use fallback responses". |
-| Out-of-memory | Use `HR_DEVICE=cpu`, or lower `max_seq_length`; the 0.5B model needs ~2–3 GB free. |
-| Answers look generic | Expected outside the 120 training Q&A pairs — see scope note in §1. Retrieval grounding (RAG) is the planned fix. |
+| First answer is slow | Base model downloading / loading (~15–20s). Subsequent answers: ~2–12s on MPS, slower on CPU. |
+| `Failed to load model` in the UI | Check Model Path exists (needs `adapter_config.json` for adapters); or switch **Answer mode** to Fallback. |
+| Out-of-memory | Use `HR_DEVICE=cpu`; the 0.5B model needs ~2–3 GB free. |
+| Answers look generic or fabricated | You're likely in **Fine-tuned** mode — switch to **Grounded** (the default) for cited, corpus-only answers that refuse when the policy doesn't cover the question. |
+| Grounded mode refuses a question it should answer | The corpus genuinely may not cover it, or the match scored below `HR_RAG_MIN_SCORE` (0.45). Lower the threshold or add the policy text to `data/`, then delete `hr_index/` to rebuild. |
+| Streamlit prints `torchvision` tracebacks | Harmless watcher noise; already disabled via `.streamlit/config.toml` (`fileWatcherType = "none"`). |
 | HF Hub rate-limit warnings | Harmless; set `HF_TOKEN` to silence and speed up downloads. |
