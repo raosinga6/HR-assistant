@@ -71,7 +71,46 @@ for i, e in enumerate(entries, 1):
     })
 
 st.subheader("Per-question log")
-st.dataframe(list(reversed(rows)), use_container_width=True, hide_index=True)
+
+# Per-column explanations (shown on header hover, and spelled out below).
+COLUMN_HELP = {
+    "#": "Order in which the question was asked (1 = the first question logged).",
+    "time": "When the question was asked (local time, YYYY-MM-DD HH:MM:SS).",
+    "question": "The exact question the user asked.",
+    "mode": "Answer mode used: grounded (RAG, cited), fine-tuned (model weights "
+            "only), or fallback (fixed templates).",
+    "prompt": "Prompt tokens — size of the input sent to the model (system rules + "
+              "any retrieved passages + the question). Grounded mode is larger "
+              "because the retrieved passages are included in the prompt.",
+    "completion": "Completion tokens — how many tokens the model generated for the "
+                  "answer.",
+    "total": "Total tokens = prompt + completion. The overall model workload for "
+             "this question.",
+    "latency_s": "Seconds from question to answer (retrieval + generation). Refused "
+                 "questions are fast because no answer is generated.",
+    "refused": "'yes' if grounded mode declined to answer because no passage passed "
+               "the retrieval-score threshold (no answer was generated).",
+    "retrieved from": "The source passages the answer was grounded in, as "
+                      "data/<file>:<line>. Empty for fine-tuned / fallback modes.",
+}
+column_config = {
+    "#": st.column_config.NumberColumn("#", help=COLUMN_HELP["#"], width="small"),
+    "time": st.column_config.TextColumn("time", help=COLUMN_HELP["time"]),
+    "question": st.column_config.TextColumn("question", help=COLUMN_HELP["question"], width="large"),
+    "mode": st.column_config.TextColumn("mode", help=COLUMN_HELP["mode"]),
+    "prompt": st.column_config.NumberColumn("prompt", help=COLUMN_HELP["prompt"], format="%d"),
+    "completion": st.column_config.NumberColumn("completion", help=COLUMN_HELP["completion"], format="%d"),
+    "total": st.column_config.NumberColumn("total", help=COLUMN_HELP["total"], format="%d"),
+    "latency_s": st.column_config.NumberColumn("latency (s)", help=COLUMN_HELP["latency_s"], format="%.2f"),
+    "refused": st.column_config.TextColumn("refused", help=COLUMN_HELP["refused"]),
+    "retrieved from": st.column_config.TextColumn("retrieved from", help=COLUMN_HELP["retrieved from"], width="large"),
+}
+st.dataframe(list(reversed(rows)), use_container_width=True, hide_index=True,
+             column_config=column_config)
+
+with st.expander("ℹ️ What do these columns mean?"):
+    for col, desc in COLUMN_HELP.items():
+        st.markdown(f"- **{col}** — {desc}")
 
 # ---- Charts ----------------------------------------------------------------
 totals = [r["total"] for r in rows]
