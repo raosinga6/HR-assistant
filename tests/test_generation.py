@@ -46,3 +46,46 @@ def test_resolve_device_reads_env(monkeypatch):
 def test_resolve_device_falls_back_to_known_value(monkeypatch):
     monkeypatch.delenv("HR_DEVICE", raising=False)
     assert resolve_device() in {"cuda", "mps", "cpu"}
+
+
+def test_greedy_generation_uses_single_sequence():
+    """Regression: greedy decoding (temperature=0) must not request multiple
+    return sequences — transformers rejects num_return_sequences>1 without
+    sampling. We capture the kwargs a fake model.generate receives."""
+    from src import generation
+
+    captured = {}
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, text, return_tensors=None):
+            return _DictTensors()
+
+        def batch_decode(self, seqs, skip_special_tokens=True):
+            return ["### Response:\nok"] * len(seqs)
+
+    class _DictTensors(dict):
+        def to(self, device):
+            return self
+
+    class FakeModel:
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return [[0]] * kwargs["num_return_sequences"]
+
+    out = generation.generate_candidates(
+        FakeModel(), FakeTokenizer(), "cpu", "q?",
+        num_candidates=3, temperature=0.0,
+    )
+    assert captured["do_sample"] is False
+    assert captured["num_return_sequences"] == 1
+    assert len(out) == 1
+
+    generation.generate_candidates(
+        FakeModel(), FakeTokenizer(), "cpu", "q?",
+        num_candidates=3, temperature=0.7,
+    )
+    assert captured["do_sample"] is True
+    assert captured["num_return_sequences"] == 3

@@ -113,11 +113,14 @@ def generate_candidates(
     prompt = build_prompt(question)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    do_sample = temperature and temperature > 0.0
+    do_sample = bool(temperature and temperature > 0.0)
+    # Greedy decoding is deterministic: transformers only allows (and only makes
+    # sense to return) a single sequence. Sampling can return N distinct ones.
+    n = num_candidates if do_sample else 1
     gen_kwargs = dict(
         max_new_tokens=max_new_tokens,
-        do_sample=bool(do_sample),
-        num_return_sequences=num_candidates,
+        do_sample=do_sample,
+        num_return_sequences=n,
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
     )
     if do_sample:
