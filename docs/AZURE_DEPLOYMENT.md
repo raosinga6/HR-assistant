@@ -168,25 +168,37 @@ sick leave?"*), and confirm you get a numbered response.
 - Set `HR_FALLBACK=1` (already the Dockerfile default).
 - **Limitation:** answers are deterministic templates, not model-generated.
 
-### Serving the fine-tuned model (advanced, GPU)
-The current model path is **not portable** to a generic Azure Linux container
-because generation uses `mlx` (Apple Silicon) and 4-bit uses Unsloth (CUDA). To
-serve the real model you must:
+### Serving the fine-tuned model (CPU-capable)
+The generation backend (`src/generation.py`) uses standard `transformers` + `peft`
+and `model.generate()`, so the fine-tuned 0.5B model **runs on a plain CPU
+container — no GPU required** (a GPU only makes it faster). To build and deploy a
+model-serving image:
 
-1. **Port `_generate_text`** in `src/app.py` off `mlx` onto standard
-   `transformers` + `torch` (use `model.generate()`), and load the model without
-   Unsloth 4-bit (or with `bitsandbytes` on GPU).
-2. **Build a GPU image** including `torch`, `transformers`, (optionally
-   `bitsandbytes`), and bake or mount the model weights.
-3. **Run on GPU compute.** Azure Container Apps has limited GPU availability;
-   the common choices are:
-   - **Azure ML Managed Online Endpoint** (GPU SKU, e.g. `Standard_NC4as_T4_v3`), or
-   - **Azure Kubernetes Service (AKS)** with a GPU node pool, or
-   - an **Azure VM** with an NVIDIA GPU running the container directly.
-4. Set `HR_FALLBACK=0` and `HR_MODEL_PATH=/models/<your-model-dir>`.
+1. **Build a model image.** Use `Dockerfile.model` (installs `torch`,
+   `transformers`, `peft` from `requirements-model.txt`) instead of the slim
+   Dockerfile:
+   ```bash
+   az acr build --registry "$ACR_NAME" --image "hr-assistant:model-$IMAGE_TAG" \
+     --file Dockerfile.model .
+   ```
+2. **Make the weights available.** The base model downloads from the Hugging Face
+   Hub on first run; the LoRA adapter under `models/` is copied into the image.
+   (For air-gapped setups, pre-bake the HF cache or mount an Azure Files share.)
+3. **Give the container enough resources** — the 0.5B model needs roughly:
+   ```bash
+   az containerapp update -n "$APP_NAME" -g "$RG" \
+     --image "$ACR_NAME.azurecr.io/hr-assistant:model-$IMAGE_TAG" \
+     --cpu 2.0 --memory 4.0Gi \
+     --min-replicas 1 \
+     --set-env-vars HR_FALLBACK=0 HR_MODEL_PATH=models/instruction_ft_adapter HR_DEVICE=cpu
+   ```
+4. (Optional) For lower latency at higher cost, run on **GPU compute** — Azure ML
+   Managed Online Endpoints, AKS with a GPU node pool, or a GPU VM — and set
+   `HR_DEVICE=cuda`.
 
-> Recommendation: ship fallback mode first (this guide), then tackle model
-> serving as a separate, GPU-scoped effort once the generation path is ported.
+> Note: CPU generation for a 0.5B model is a few seconds per answer, which is fine
+> for a low-traffic assistant. Keep `--min-replicas 1` to avoid cold-start model
+> loads on every request.
 
 ---
 

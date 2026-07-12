@@ -11,13 +11,16 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Model weights & large binaries (not needed for fallback image)
-models/
-*.safetensors
+# Model weights & large binaries. Excluded by default (slim/fallback image does
+# not need them). Training checkpoints (optimizer state, etc.) are always excluded.
 *.pt
 *.pth
-*.bin
 *.ckpt
+models/
+# ...but keep the single LoRA adapter the model-serving image (Dockerfile.model)
+# copies in. The slim Dockerfile does not COPY models/, so this only affects it.
+!models/instruction_ft_adapter
+!models/instruction_ft_adapter/**
 
 # Data & notebooks (not needed at runtime)
 data/
