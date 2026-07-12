@@ -46,7 +46,19 @@ no mlx, no Unsloth at inference time).
 | `generate_candidates(...)` | One batched `model.generate()` call with `num_return_sequences=N` (default 3), temperature/top-p sampling, EOS stop. Strips the prompt prefix from each output. |
 | `generate_answer(...)` | candidates → `reranker.rerank()` → best; if the winner looks like code, one deterministic retry (`temperature=0`). |
 
-## `src/reranker.py` — answer selection
+## `src/rag.py` — grounded (RAG) answering
+
+The app's default mode. `build_corpus()` turns `data/non_instruction_data.txt`
+(policy paragraphs) + `data/instruction_dataset.jsonl` (Q&A pairs) into ~180
+passages; `HRRag` embeds them with MiniLM (index auto-built under `hr_index/`,
+exact numpy cosine search — no vector DB needed at this scale) and generates
+with Qwen2.5-0.5B-Instruct under a strict system prompt: answer only from the
+passages, cite by number, refuse otherwise. A retrieval-score threshold
+(`HR_RAG_MIN_SCORE`, default 0.45) refuses *before* generation when the best
+match is weak — small models otherwise adapt a similar-but-wrong procedure.
+Deterministic by default (`temperature=0`).
+
+## `src/reranker.py` — answer selection (ungrounded mode)
 
 Scores each candidate with simple, tunable heuristics (`default_weights()`):
 

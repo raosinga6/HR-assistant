@@ -30,3 +30,6 @@ models/
 *.pth
 *.bin
 *.ckpt
+
+# Generated retrieval index
+hr_index/

@@ -19,3 +19,5 @@ pandas>=2.0.0
 
 # Testing
 pytest>=7.0.0
+# Grounded-mode retrieval
+sentence-transformers>=3.0.0

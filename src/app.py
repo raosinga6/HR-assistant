@@ -38,6 +38,16 @@ def load_model(model_path: str):
     return _load_model(model_path)
 
 
+@st.cache_resource
+def load_rag():
+    """Load and cache the grounded (RAG) pipeline over the policy corpus."""
+    try:
+        from rag import HRRag
+    except ImportError:
+        from src.rag import HRRag
+    return HRRag()
+
+
 def generate_answer(model, tokenizer, device, question: str, max_new_tokens: int = 200,
                     temperature: float = 0.7) -> str:
     """Generate an answer using the shared backend (multi-candidate + rerank)."""
@@ -83,20 +93,31 @@ def main():
         st.markdown("---")
         st.markdown("""
         **Domain**: Human Resources
-        **Model**: Qwen2.5-0.5B (fine-tuned)
-        **Backend**: transformers + peft
+        **Default**: grounded RAG over policy docs (cited, refuses off-corpus)
+        **Model**: Qwen2.5-0.5B
         """)
         st.markdown("---")
 
         # Model settings. Defaults are configurable via environment variables so
         # the same image can run in fallback mode or be pointed at a model.
         st.subheader("⚙️ Settings")
-        default_model_path = os.getenv("HR_MODEL_PATH", "models/instruction_ft_adapter")
+        MODES = ["Grounded (RAG, cited)", "Fine-tuned model (ungrounded)",
+                 "Fallback templates (no model)"]
         default_fallback = os.getenv("HR_FALLBACK", "0").lower() in ("1", "true", "yes")
-        model_path = st.text_input("Model Path", value=default_model_path)
-        use_fallback = st.checkbox("Use fallback responses (no model)", value=default_fallback)
+        mode = st.radio(
+            "Answer mode", MODES, index=2 if default_fallback else 0,
+            help="Grounded: retrieves actual policy passages and answers only from "
+                 "them — with citations, and a refusal when the policy doesn't "
+                 "cover the question. Fine-tuned: answers from model weights "
+                 "alone (can fabricate details).",
+        )
+        grounded = mode == MODES[0]
+        use_fallback = mode == MODES[2]
+        default_model_path = os.getenv("HR_MODEL_PATH", "models/instruction_ft_adapter")
+        model_path = st.text_input("Model Path (fine-tuned mode)", value=default_model_path)
         max_tokens = st.slider("Max Tokens", 50, 500, 200, 50)
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.1)
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.0, 0.1,
+                                help="0 = same answer every time (recommended for policy QA)")
 
         st.markdown("---")
         st.markdown("### Example Questions")
@@ -121,12 +142,18 @@ def main():
     st.title("HR Policy Assistant")
     st.markdown("Ask me anything about HR policies, leave, benefits, compliance, and more!")
 
-    # Load model (or use fallback)
-    model = None
-    tokenizer = None
-    device = None
+    # Load the selected backend
+    model = tokenizer = device = rag = None
     if use_fallback:
         st.info("Using deterministic fallback responses (no model loaded)")
+    elif grounded:
+        try:
+            with st.spinner("Loading policy index and model..."):
+                rag = load_rag()
+            st.success(f"Grounded mode ready — {rag.num_passages} policy passages, device: {rag.device}")
+        except Exception as e:
+            st.error(f"Failed to load grounded pipeline: {e}")
+            return
     else:
         try:
             with st.spinner("Loading model..."):
@@ -134,7 +161,7 @@ def main():
             st.success(f"Model loaded successfully on {device}!")
         except Exception as e:
             st.error(f"Failed to load model: {e}")
-            st.info("Make sure the model path is correct, or enable 'Use fallback responses' in the sidebar.")
+            st.info("Make sure the model path is correct, or switch modes in the sidebar.")
             return
 
     # Chat history
@@ -144,6 +171,9 @@ def main():
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            for i, s in enumerate(message.get("sources", []), 1):
+                with st.expander(f"[{i}] {s['source']} (relevance {s['score']:.2f})"):
+                    st.markdown(s["text"])
 
     # Chat input
     if prompt := st.chat_input("Ask an HR question..."):
@@ -160,13 +190,23 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
+                    sources = []
                     if use_fallback:
                         response = fallback_answer(prompt)
+                    elif grounded:
+                        response, sources = rag.answer(
+                            prompt, max_new_tokens=max_tokens, temperature=temperature)
                     else:
                         response = generate_answer(model, tokenizer, device, prompt, max_tokens, temperature)
 
                     st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    for i, s in enumerate(sources, 1):
+                        with st.expander(f"[{i}] {s['source']} (relevance {s['score']:.2f})"):
+                            st.markdown(s["text"])
+                    msg = {"role": "assistant", "content": response}
+                    if sources:
+                        msg["sources"] = sources
+                    st.session_state.messages.append(msg)
                 except Exception as e:
                     error_msg = f"Error generating response: {e}"
                     st.error(error_msg)

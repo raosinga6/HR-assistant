@@ -132,11 +132,13 @@ but can be generic outside them; it cannot cite sources; DPO artifacts were
 never exported, so the preference-alignment stage isn't in the served model.
 
 **Roadmap, in order of impact:**
-1. **Retrieval grounding (RAG)** — index the HR policy corpus, retrieve
-   passages per question, and constrain answers to them with citations and an
-   "I don't know" refusal. A working reference implementation already exists in
-   the sibling [wiki-rag-assistant](https://github.com/raosinga6/wiki-rag-assistant)
-   project — the plan is to point that pipeline at the HR data.
+1. ~~**Retrieval grounding (RAG)**~~ — ✅ **shipped** (`src/rag.py`): policy
+   passages + Q&A pairs are embedded and retrieved per question; answers are
+   constrained to retrieved text with citations; a retrieval-score threshold
+   refuses out-of-corpus questions (e.g. sick leave — which the policy data
+   never covers) instead of letting the model improvise. Grounded mode is the
+   app default. Pattern proven first in the sibling
+   [wiki-rag-assistant](https://github.com/raosinga6/wiki-rag-assistant) project.
 2. **Export and serve the DPO-aligned model** (stage 3 artifacts).
 3. **Evaluation harness** — regression-test answer quality on a held-out Q&A
    set, so model changes are measurable rather than vibes-based.

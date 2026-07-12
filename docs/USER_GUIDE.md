@@ -8,14 +8,17 @@ rationale, see [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md).
 
 ## 1. What it does
 
-Answers HR policy questions (leave, WFH, reimbursement, notice periods,
-benefits…) using **Qwen2.5-0.5B fine-tuned on 120 HR policy Q&A pairs**. Runs
-locally on CPU, NVIDIA GPU (CUDA), or Apple Silicon (MPS) — no cloud calls.
+Answers HR policy questions (comp-off, policy reviews, work hours…) grounded
+in the company policy corpus. Runs locally on CPU, NVIDIA GPU (CUDA), or Apple
+Silicon (MPS) — no cloud calls.
 
-> **Honest scope note:** answers come from the model's fine-tuned weights, not
-> from live retrieval over your policy documents. It answers fluently within
-> its training data but can be generic or imprecise outside it. Treat it as a
-> guidance assistant, not a source of record.
+**Three answer modes** (sidebar radio):
+
+| Mode | How it answers | When to use |
+|---|---|---|
+| **Grounded (RAG, cited)** — default | Retrieves actual policy passages, answers only from them with expandable citations, and replies *"I don't know based on the company's policy documents."* when the corpus doesn't cover the question | Always, for trustworthy answers |
+| Fine-tuned model (ungrounded) | Qwen2.5-0.5B + SFT adapter answering from weights alone | Comparing model behavior; **can fabricate details** |
+| Fallback templates | Deterministic canned answers, zero ML dependencies | Demos, CI |
 
 ---
 
