@@ -80,13 +80,42 @@ Useful flags: `--model_path <dir|hub-id>`, `--max_tokens N`, `--temperature T`.
 
 ---
 
-## 5. Configuration (environment variables)
+## 5. Observability
+
+Every answer is instrumented:
+
+- **Per-answer metrics** (shown under each response): prompt tokens, completion
+  tokens, total tokens, latency, mode, device, and — in grounded mode — the top
+  retrieval score.
+- **Source provenance** (grounded mode): each cited passage shows the exact
+  `data/<file>:<line>` it was retrieved from, expandable to the full text.
+- **Session totals** (sidebar → 📊 Observability): running token count and an
+  in-session audit-log view.
+- **Persistent audit log**: every question is appended to
+  `logs/audit_log.jsonl` (one JSON object per answer) with timestamp, question,
+  answer, refusal flag, the retrieved sources (`id`, `source_ref`, `score`), and
+  token/latency metrics. Point `HR_AUDIT_LOG` elsewhere to change the path.
+
+Example audit entry (abridged):
+```json
+{"ts": "2026-07-13T00:46:45", "question": "Who approves my compensatory off request?",
+ "answer": "Your compensatory off request must be approved by your reporting manager.",
+ "refused": false,
+ "sources": [{"n": 1, "id": "qa-24", "source_ref": "data/instruction_dataset.jsonl:25", "score": 0.68}],
+ "metrics": {"mode": "grounded", "prompt_tokens": 409, "completion_tokens": 14,
+             "total_tokens": 423, "latency_s": 3.12, "top_score": 0.68}}
+```
+
+## 6. Configuration (environment variables)
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `HR_MODEL_PATH` | `models/instruction_ft_adapter` | Model the Streamlit app loads |
 | `HR_FALLBACK` | `0` | `1` = start the app in fallback mode (no model) |
 | `HR_DEVICE` | auto (cuda → mps → cpu) | Force a torch device, e.g. `HR_DEVICE=cpu` |
+| `HR_RAG_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | Generator for grounded mode |
+| `HR_RAG_MIN_SCORE` | `0.45` | Retrieval score below which grounded mode refuses |
+| `HR_AUDIT_LOG` | `logs/audit_log.jsonl` | Where the audit log is written |
 
 ---
 

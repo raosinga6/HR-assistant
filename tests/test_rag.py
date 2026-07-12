@@ -5,8 +5,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.rag import (REFUSAL, SYSTEM_PROMPT, build_corpus, build_messages,
-                     format_context)
+import json
+
+from src.rag import (REFUSAL, SYSTEM_PROMPT, append_audit_log, build_corpus,
+                     build_messages, format_context)
 
 CHUNKS = [
     {"id": "qa-1", "source": "policy Q&A", "text": "Q: Who approves comp off?\nA: Your reporting manager.", "score": 0.7},
@@ -42,3 +44,30 @@ def test_system_prompt_enforces_grounding_and_refusal():
     assert "ONLY" in SYSTEM_PROMPT
     assert REFUSAL in SYSTEM_PROMPT
     assert "invent" in SYSTEM_PROMPT
+
+
+def test_every_passage_has_a_source_ref():
+    # The audit trail: each passage traces to a data file and line number.
+    passages = build_corpus(os.path.join(ROOT, "data"))
+    for p in passages:
+        assert ":" in p["source_ref"]
+        f, line = p["source_ref"].rsplit(":", 1)
+        assert f.endswith((".jsonl", ".txt"))
+        assert line.isdigit() and int(line) >= 1
+    # Q&A source_ref line number matches its 1-based JSONL position
+    qa = [p for p in passages if p["id"] == "qa-0"][0]
+    assert qa["source_ref"].endswith("instruction_dataset.jsonl:1")
+
+
+def test_append_audit_log_writes_jsonl(tmp_path):
+    meta = {"mode": "grounded", "model": "m", "device": "cpu",
+            "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+            "latency_s": 0.5, "top_score": 0.7, "refused": False}
+    log = tmp_path / "audit.jsonl"
+    entry = append_audit_log("Q?", "A.", CHUNKS, meta, path=str(log))
+
+    assert entry["question"] == "Q?"
+    assert entry["metrics"]["total_tokens"] == 15
+    assert entry["sources"][0]["id"] == "qa-1"
+    on_disk = json.loads(log.read_text().strip())
+    assert on_disk == entry

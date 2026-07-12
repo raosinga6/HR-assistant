@@ -33,3 +33,6 @@ models/
 
 # Generated retrieval index
 hr_index/
+
+# Audit logs
+logs/

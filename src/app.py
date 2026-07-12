@@ -14,9 +14,11 @@ import streamlit as st
 # Backend import works whether launched via `streamlit run src/app.py`
 # (src/ on path) or imported as a package.
 try:
-    from generation import load_model as _load_model, generate_answer as _generate_answer
+    from generation import load_model as _load_model, generate_answer_with_meta
+    from rag import append_audit_log
 except ImportError:
-    from src.generation import load_model as _load_model, generate_answer as _generate_answer
+    from src.generation import load_model as _load_model, generate_answer_with_meta
+    from src.rag import append_audit_log
 
 
 # Page configuration
@@ -48,13 +50,21 @@ def load_rag():
     return HRRag()
 
 
-def generate_answer(model, tokenizer, device, question: str, max_new_tokens: int = 200,
-                    temperature: float = 0.7) -> str:
-    """Generate an answer using the shared backend (multi-candidate + rerank)."""
-    return _generate_answer(
-        model, tokenizer, device, question,
-        max_new_tokens=max_new_tokens, temperature=temperature,
-    )
+def render_metrics(meta: dict):
+    """Show token usage / latency for one answer as a compact metric row."""
+    if not meta:
+        return
+    cols = st.columns(4)
+    cols[0].metric("Prompt tokens", meta.get("prompt_tokens", 0))
+    cols[1].metric("Completion tokens", meta.get("completion_tokens", 0))
+    cols[2].metric("Total tokens", meta.get("total_tokens", 0))
+    cols[3].metric("Latency (s)", meta.get("latency_s", 0))
+    bits = [f"mode: **{meta.get('mode')}**", f"device: `{meta.get('device')}`"]
+    if meta.get("top_score") is not None:
+        bits.append(f"top match: `{meta.get('top_score')}`")
+    if meta.get("refused"):
+        bits.append("↩︎ **refused** (below retrieval threshold)")
+    st.caption(" · ".join(bits))
 
 
 def fallback_answer(question: str) -> str:
@@ -105,7 +115,7 @@ def main():
                  "Fallback templates (no model)"]
         default_fallback = os.getenv("HR_FALLBACK", "0").lower() in ("1", "true", "yes")
         mode = st.radio(
-            "Answer mode", MODES, index=2 if default_fallback else 0,
+            "Answer mode", MODES, index=2 if default_fallback else 0, key="answer_mode",
             help="Grounded: retrieves actual policy passages and answers only from "
                  "them — with citations, and a refusal when the policy doesn't "
                  "cover the question. Fine-tuned: answers from model weights "
@@ -138,6 +148,25 @@ def main():
                 st.session_state.user_input = q
                 st.rerun()
 
+        # Observability panel
+        st.markdown("---")
+        st.subheader("📊 Observability")
+        st.metric("Tokens used this session", st.session_state.get("total_tokens", 0))
+        audit = st.session_state.get("audit", [])
+        st.caption(f"{len(audit)} question(s) logged → `{os.getenv('HR_AUDIT_LOG', 'logs/audit_log.jsonl')}`")
+        if audit:
+            with st.expander("🧾 Audit log (this session)"):
+                for i, e in enumerate(reversed(audit), 1):
+                    m = e["meta"]
+                    st.markdown(f"**Q:** {e['q']}")
+                    refs = ", ".join(s.get("source_ref", "?") for s in e["sources"]) or "—"
+                    st.caption(
+                        f"{m.get('total_tokens', 0)} tok · {m.get('latency_s', 0)}s · "
+                        f"{'refused' if m.get('refused') else 'answered'} · retrieved from: {refs}"
+                    )
+                    if i < len(audit):
+                        st.divider()
+
     # Main content
     st.title("HR Policy Assistant")
     st.markdown("Ask me anything about HR policies, leave, benefits, compliance, and more!")
@@ -164,16 +193,23 @@ def main():
             st.info("Make sure the model path is correct, or switch modes in the sidebar.")
             return
 
-    # Chat history
+    # Chat history + observability state
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "audit" not in st.session_state:
+        st.session_state.audit = []
+    if "total_tokens" not in st.session_state:
+        st.session_state.total_tokens = 0
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             for i, s in enumerate(message.get("sources", []), 1):
-                with st.expander(f"[{i}] {s['source']} (relevance {s['score']:.2f})"):
+                ref = s.get("source_ref", s.get("source", ""))
+                with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
                     st.markdown(s["text"])
+            if message.get("meta"):
+                render_metrics(message["meta"])
 
     # Chat input
     if prompt := st.chat_input("Ask an HR question..."):
@@ -190,20 +226,36 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    sources = []
+                    sources, meta = [], {}
                     if use_fallback:
                         response = fallback_answer(prompt)
+                        meta = {"mode": "fallback", "model": "templates", "device": "cpu",
+                                "prompt_tokens": 0, "completion_tokens": 0,
+                                "total_tokens": 0, "latency_s": 0, "top_score": None,
+                                "refused": False}
                     elif grounded:
-                        response, sources = rag.answer(
+                        response, sources, meta = rag.answer(
                             prompt, max_new_tokens=max_tokens, temperature=temperature)
                     else:
-                        response = generate_answer(model, tokenizer, device, prompt, max_tokens, temperature)
+                        response, meta = generate_answer_with_meta(
+                            model, tokenizer, device, prompt,
+                            max_new_tokens=max_tokens, temperature=temperature,
+                            model_name=model_path)
 
                     st.markdown(response)
                     for i, s in enumerate(sources, 1):
-                        with st.expander(f"[{i}] {s['source']} (relevance {s['score']:.2f})"):
+                        ref = s.get("source_ref", s.get("source", ""))
+                        with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
                             st.markdown(s["text"])
-                    msg = {"role": "assistant", "content": response}
+                    render_metrics(meta)
+
+                    # Persist to the audit log + running session totals.
+                    append_audit_log(prompt, response, sources, meta)
+                    st.session_state.audit.append(
+                        {"q": prompt, "meta": meta, "sources": sources})
+                    st.session_state.total_tokens += meta.get("total_tokens", 0)
+
+                    msg = {"role": "assistant", "content": response, "meta": meta}
                     if sources:
                         msg["sources"] = sources
                     st.session_state.messages.append(msg)

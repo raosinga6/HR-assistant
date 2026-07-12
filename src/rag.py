@@ -61,32 +61,92 @@ SYSTEM_PROMPT = (
 )
 
 
+DEFAULT_AUDIT_LOG = "logs/audit_log.jsonl"
+
+
+# --------------------------------------------------------------------------
+# Audit log
+# --------------------------------------------------------------------------
+
+def append_audit_log(question: str, answer: str, sources: List[Dict],
+                     meta: Dict, path: Optional[str] = None) -> Dict:
+    """Append one answer event to the audit log (JSONL) and return the entry.
+
+    Records what was asked, what was answered, which passages it was retrieved
+    from (id + source_ref = file:line + score), and token/latency metrics.
+    """
+    import datetime
+
+    path = path or os.getenv("HR_AUDIT_LOG", DEFAULT_AUDIT_LOG)
+    entry = {
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "question": question,
+        "answer": answer,
+        "refused": meta.get("refused", False),
+        "sources": [
+            {"n": i, "id": s.get("id"), "source_ref": s.get("source_ref"),
+             "score": round(s.get("score", 0.0), 3)}
+            for i, s in enumerate(sources, 1)
+        ],
+        "metrics": {k: meta.get(k) for k in
+                    ("mode", "model", "device", "prompt_tokens",
+                     "completion_tokens", "total_tokens", "latency_s", "top_score")},
+    }
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
+
+
 # --------------------------------------------------------------------------
 # Corpus
 # --------------------------------------------------------------------------
 
 def build_corpus(data_dir: str = "data") -> List[Dict]:
-    """Collect retrieval passages from the HR policy data files."""
+    """Collect retrieval passages from the HR policy data files.
+
+    Every passage records `source_ref` (file:line) so an answer can be audited
+    back to the exact line it was retrieved from.
+    """
     data_dir = Path(data_dir)
     passages: List[Dict] = []
 
-    # Policy paragraphs (blank-line separated; skip headings/short fragments)
+    # Policy paragraphs (blank-line separated), tracking the starting line so we
+    # can cite e.g. "non_instruction_data.txt:12".
     policy_file = data_dir / "non_instruction_data.txt"
     if policy_file.exists():
-        for i, para in enumerate(re.split(r"\n\s*\n", policy_file.read_text())):
-            para = " ".join(para.split())
-            if len(para) >= 80:
-                passages.append({"id": f"policy-{i}", "source": "policy document", "text": para})
+        rel = str(policy_file)
+        buf: List[str] = []
+        start_line = None
+        pi = 0
+        lines = policy_file.read_text().split("\n")
+        for lineno, line in enumerate(lines + [""], start=1):  # sentinel flush
+            if line.strip():
+                if start_line is None:
+                    start_line = lineno
+                buf.append(line)
+            elif buf:
+                para = " ".join(" ".join(buf).split())
+                if len(para) >= 80:
+                    passages.append({
+                        "id": f"policy-{pi}", "source": "policy document",
+                        "text": para, "source_ref": f"{rel}:{start_line}",
+                    })
+                    pi += 1
+                buf, start_line = [], None
 
-    # Q&A pairs — real policy answers, phrased as questions employees ask
+    # Q&A pairs — real policy answers, one JSONL line each.
     qa_file = data_dir / "instruction_dataset.jsonl"
     if qa_file.exists():
+        rel = str(qa_file)
         for i, line in enumerate(qa_file.open()):
             rec = json.loads(line)
             passages.append({
                 "id": f"qa-{i}",
                 "source": "policy Q&A",
                 "text": f"Q: {rec['instruction']}\nA: {rec['response']}",
+                "source_ref": f"{rel}:{i + 1}",  # JSONL line number (1-based)
             })
 
     return passages
@@ -137,6 +197,7 @@ class HRRag:
 
         self.device = resolve_device(device)
         model_path = model_path or os.getenv("HR_RAG_MODEL", DEFAULT_GEN_MODEL)
+        self.model_name = model_path
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype)
@@ -176,24 +237,41 @@ class HRRag:
 
     def answer(self, question: str, top_k: int = 4, max_new_tokens: int = 256,
                temperature: float = 0.0,
-               min_score: Optional[float] = None) -> Tuple[str, List[Dict]]:
-        """Return (answer, sources). Deterministic by default: policy QA
-        should give the same answer every time.
+               min_score: Optional[float] = None) -> Tuple[str, List[Dict], Dict]:
+        """Return (answer, sources, meta).
 
-        If no retrieved passage reaches `min_score`, refuse immediately —
-        don't hand weak context to a small model that will improvise.
+        `meta` carries observability data: token counts, latency, device,
+        whether the question was refused, and the top retrieval score.
+        Deterministic by default (temperature=0). If no retrieved passage
+        reaches `min_score`, refuse immediately — don't hand weak context to a
+        small model that will improvise.
         """
+        import time
+
         import torch
 
         if min_score is None:
             min_score = float(os.getenv("HR_RAG_MIN_SCORE", DEFAULT_MIN_SCORE))
 
+        t0 = time.time()
         chunks = self.search(question, top_k=top_k)
-        if not chunks or chunks[0]["score"] < min_score:
-            return REFUSAL, chunks
+        top_score = chunks[0]["score"] if chunks else 0.0
+
+        meta = {
+            "mode": "grounded", "model": self.model_name, "device": self.device,
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "top_score": round(top_score, 3), "refused": False,
+        }
+
+        if not chunks or top_score < min_score:
+            meta["refused"] = True
+            meta["latency_s"] = round(time.time() - t0, 2)
+            return REFUSAL, chunks, meta
+
         prompt = self.tokenizer.apply_chat_template(
             build_messages(question, chunks), tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        prompt_tokens = int(inputs["input_ids"].shape[1])
 
         do_sample = bool(temperature and temperature > 0.0)
         gen_kwargs = dict(
@@ -207,9 +285,17 @@ class HRRag:
         with torch.no_grad():
             output = self.model.generate(**inputs, **gen_kwargs)
 
-        new_tokens = output[0][inputs["input_ids"].shape[1]:]
+        new_tokens = output[0][prompt_tokens:]
         answer = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-        return answer, chunks
+
+        completion_tokens = int(new_tokens.shape[0])
+        meta.update(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            latency_s=round(time.time() - t0, 2),
+        )
+        return answer, chunks, meta
 
 
 def main():
@@ -231,11 +317,18 @@ def main():
         parser.error("--question is required (or use --rebuild)")
 
     rag = HRRag(index_dir=args.index_dir)
-    answer, sources = rag.answer(args.question, top_k=args.top_k)
-    print(f"\nQ: {args.question}\n\nA: {answer}\n\nSources:")
-    for i, s in enumerate(sources, 1):
-        preview = s["text"][:90].replace("\n", " ")
-        print(f"  [{i}] ({s['source']}, score {s['score']:.3f}) {preview}...")
+    answer, sources, meta = rag.answer(args.question, top_k=args.top_k)
+    append_audit_log(args.question, answer, sources, meta)
+
+    print(f"\nQ: {args.question}\n\nA: {answer}\n")
+    if not meta["refused"]:
+        print("Sources:")
+        for i, s in enumerate(sources, 1):
+            preview = s["text"][:80].replace("\n", " ")
+            print(f"  [{i}] {s.get('source_ref')} (score {s['score']:.3f}) {preview}...")
+    print(f"\nTokens: {meta['prompt_tokens']} prompt + {meta['completion_tokens']} "
+          f"completion = {meta['total_tokens']} total | {meta['latency_s']}s | "
+          f"{meta['device']} | top score {meta['top_score']}")
 
 
 if __name__ == "__main__":

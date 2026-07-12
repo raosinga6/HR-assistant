@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "hr-ui",
+      "runtimeExecutable": "/Volumes/Software/projects/HR assistant/run_ui.sh",
+      "runtimeArgs": [],
+      "autoPort": true
+    },
+    {
       "name": "wiki-rag-ui",
       "runtimeExecutable": "/Volumes/Software/projects/wiki-rag-assistant/run_ui.sh",
       "runtimeArgs": [],

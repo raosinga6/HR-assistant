@@ -52,28 +52,30 @@ def test_greedy_generation_uses_single_sequence():
     """Regression: greedy decoding (temperature=0) must not request multiple
     return sequences — transformers rejects num_return_sequences>1 without
     sampling. We capture the kwargs a fake model.generate receives."""
+    import numpy as np
+
     from src import generation
 
     captured = {}
+
+    class _Inputs(dict):
+        def to(self, device):
+            return self
 
     class FakeTokenizer:
         pad_token_id = 0
         eos_token_id = 0
 
         def __call__(self, text, return_tensors=None):
-            return _DictTensors()
+            return _Inputs(input_ids=np.zeros((1, 5)))  # 5 prompt tokens
 
         def batch_decode(self, seqs, skip_special_tokens=True):
             return ["### Response:\nok"] * len(seqs)
 
-    class _DictTensors(dict):
-        def to(self, device):
-            return self
-
     class FakeModel:
         def generate(self, **kwargs):
             captured.update(kwargs)
-            return [[0]] * kwargs["num_return_sequences"]
+            return [np.zeros(7) for _ in range(kwargs["num_return_sequences"])]
 
     out = generation.generate_candidates(
         FakeModel(), FakeTokenizer(), "cpu", "q?",

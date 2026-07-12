@@ -18,7 +18,7 @@ and degraded output quality.
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Reranker import that works whether this module is imported as `src.generation`
 # (tests, `python -m`) or `generation` (streamlit run src/app.py, src/ on path).
@@ -97,21 +97,14 @@ def load_model(model_path: str, device: Optional[str] = None):
     return model, tokenizer, device
 
 
-def generate_candidates(
-    model,
-    tokenizer,
-    device: str,
-    question: str,
-    num_candidates: int = 3,
-    max_new_tokens: int = 200,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
-) -> List[str]:
-    """Generate N candidate answers with a single batched `model.generate` call."""
+def _generate(model, tokenizer, device, question, num_candidates,
+              max_new_tokens, temperature, top_p):
+    """Core generation. Returns (responses, prompt_tokens, completion_tokens)."""
     import torch
 
     prompt = build_prompt(question)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    prompt_tokens = int(inputs["input_ids"].shape[1])
 
     do_sample = bool(temperature and temperature > 0.0)
     # Greedy decoding is deterministic: transformers only allows (and only makes
@@ -129,8 +122,26 @@ def generate_candidates(
     with torch.no_grad():
         outputs = model.generate(**inputs, **gen_kwargs)
 
+    # completion tokens = every generated token beyond the shared prompt
+    completion_tokens = int(sum(seq.shape[0] - prompt_tokens for seq in outputs))
     texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    return [extract_response(t) for t in texts]
+    return [extract_response(t) for t in texts], prompt_tokens, completion_tokens
+
+
+def generate_candidates(
+    model,
+    tokenizer,
+    device: str,
+    question: str,
+    num_candidates: int = 3,
+    max_new_tokens: int = 200,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+) -> List[str]:
+    """Generate N candidate answers with a single batched `model.generate` call."""
+    texts, _, _ = _generate(model, tokenizer, device, question, num_candidates,
+                            max_new_tokens, temperature, top_p)
+    return texts
 
 
 def generate_answer(
@@ -163,3 +174,43 @@ def generate_answer(
             best = retry[0]
 
     return best or ""
+
+
+def generate_answer_with_meta(
+    model,
+    tokenizer,
+    device: str,
+    question: str,
+    num_candidates: int = 3,
+    max_new_tokens: int = 200,
+    temperature: float = 0.7,
+    model_name: str = "fine-tuned",
+) -> Tuple[str, Dict]:
+    """Like `generate_answer`, but also returns observability metrics
+    (prompt/completion/total tokens across all candidates, latency, device)."""
+    import time
+
+    t0 = time.time()
+    candidates, prompt_tokens, completion_tokens = _generate(
+        model, tokenizer, device, question, num_candidates,
+        max_new_tokens, temperature, 0.9,
+    )
+    best = rerank(candidates, question) or ""
+
+    if best and is_code_like(best):
+        retry, p2, c2 = _generate(
+            model, tokenizer, device, question, 1, max_new_tokens, 0.0, 0.9)
+        completion_tokens += c2
+        if retry and not is_code_like(retry[0]):
+            best = retry[0]
+
+    meta = {
+        "mode": "fine-tuned", "model": model_name, "device": device,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "latency_s": round(time.time() - t0, 2),
+        "candidates": len(candidates),
+        "top_score": None, "refused": False,
+    }
+    return best, meta
