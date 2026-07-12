@@ -3,6 +3,9 @@ headless = true
 address = "0.0.0.0"
 port = 8501
 enableXsrfProtection = true
+# Don't crawl imported modules for hot-reload: transformers' lazy vision
+# submodules raise ModuleNotFoundError (torchvision) tracebacks on every scan.
+fileWatcherType = "none"
 
 [browser]
 gatherUsageStats = false
