@@ -279,6 +279,7 @@ class HRRag:
             "mode": "grounded", "model": self.model_name, "device": self.device,
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
             "top_score": round(top_score, 3), "refused": False,
+            "retrieved": len(chunks), "used": 0,
         }
 
         if not chunks or top_score < min_score:
@@ -286,8 +287,14 @@ class HRRag:
             meta["latency_s"] = round(time.time() - t0, 2)
             return REFUSAL, chunks, meta
 
+        # Ground the answer in only the passages that clear the relevance bar —
+        # not all top_k. This keeps the model from drawing on weak matches and
+        # keeps the displayed/cited sources meaningful. (At least chunks[0]
+        # qualifies, since top_score >= min_score above.)
+        relevant = [c for c in chunks if c["score"] >= min_score]
+
         prompt = self.tokenizer.apply_chat_template(
-            build_messages(question, chunks), tokenize=False, add_generation_prompt=True)
+            build_messages(question, relevant), tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         prompt_tokens = int(inputs["input_ids"].shape[1])
 
@@ -312,8 +319,9 @@ class HRRag:
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
             latency_s=round(time.time() - t0, 2),
+            used=len(relevant),
         )
-        return answer, chunks, meta
+        return answer, relevant, meta
 
 
 def main():
