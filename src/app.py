@@ -217,17 +217,31 @@ def main():
                             model_name=model_path)
 
                     st.markdown(response)
-                    for i, s in enumerate(sources, 1):
-                        ref = s.get("source_ref", s.get("source", ""))
-                        with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
-                            st.markdown(s["text"])
+
+                    # A refusal used no passages — don't list the low-relevance
+                    # ones it looked at (that reads like it had sources). Explain
+                    # why instead. The audit log still keeps what was considered.
+                    if meta.get("refused"):
+                        ts = meta.get("top_score")
+                        st.caption(
+                            f"↩︎ No policy passage cleared the relevance threshold "
+                            f"(best match {ts} < {os.getenv('HR_RAG_MIN_SCORE', '0.45')}). "
+                            f"Declined instead of guessing."
+                        )
+                        display_sources = []
+                    else:
+                        display_sources = sources
+                        for i, s in enumerate(display_sources, 1):
+                            ref = s.get("source_ref", s.get("source", ""))
+                            with st.expander(f"[{i}] {ref} (relevance {s['score']:.2f})"):
+                                st.markdown(s["text"])
 
                     # Persist to the audit log (viewable on the Token Usage page).
                     append_audit_log(prompt, response, sources, meta)
 
                     msg = {"role": "assistant", "content": response}
-                    if sources:
-                        msg["sources"] = sources
+                    if display_sources:
+                        msg["sources"] = display_sources
                     st.session_state.messages.append(msg)
                 except Exception as e:
                     error_msg = f"Error generating response: {e}"
